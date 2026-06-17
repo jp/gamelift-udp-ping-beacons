@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -93,5 +94,36 @@ func TestShouldPause(t *testing.T) {
 				t.Fatalf("shouldPause() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunAllSendsProgress(t *testing.T) {
+	progress := make(chan progressEvent, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	results := runAll(ctx, []endpoint{{
+		Continent:   "Test",
+		Name:        "No IPv6",
+		Code:        "test-1",
+		Address:     "example.invalid:7770",
+		Protocol:    "UDP",
+		IPv6Support: false,
+	}}, time.Second, time.Millisecond, time.Millisecond, "ipv6", progress)
+
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Error == "" {
+		t.Fatal("expected endpoint error")
+	}
+
+	select {
+	case event := <-progress:
+		if event.Done != 1 {
+			t.Fatalf("event.Done = %d, want 1", event.Done)
+		}
+	default:
+		t.Fatal("expected progress event")
 	}
 }

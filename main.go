@@ -67,6 +67,10 @@ type report struct {
 	Results     []result  `json:"results"`
 }
 
+type progressEvent struct {
+	Done int
+}
+
 var endpoints = []endpoint{
 	{"North America", "US East (N. Virginia)", "us-east-1", "gamelift-ping.us-east-1.api.aws:7770", "UDP", true},
 	{"North America", "US East (Ohio)", "us-east-2", "gamelift-ping.us-east-2.api.aws:7770", "UDP", true},
@@ -122,7 +126,28 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *duration)
 	defer cancel()
 
-	results := runAll(ctx, endpoints, *duration, *interval, *timeout, *family)
+	var progress chan progressEvent
+	var progressDone chan struct{}
+	showProgress := *format == "table"
+	if showProgress {
+		printScanIntro(len(endpoints), *duration, *interval, *timeout, *family)
+		if stdoutIsTerminal() {
+			progress = make(chan progressEvent, len(endpoints))
+			progressDone = make(chan struct{})
+			go showScanProgress(progressDone, progress, len(endpoints), *duration)
+		} else {
+			fmt.Println("Scanning in progress...")
+		}
+	}
+
+	results := runAll(ctx, endpoints, *duration, *interval, *timeout, *family, progress)
+	if progress != nil {
+		close(progress)
+		<-progressDone
+	} else if showProgress {
+		fmt.Println("Scan complete.")
+		fmt.Println()
+	}
 	if !*includeSamples {
 		for i := range results {
 			results[i].Samples = nil
@@ -209,14 +234,22 @@ func shouldPause(pause, goos string, launchedWithoutArgs, stdinIsTerminal bool) 
 }
 
 func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
+	return fileIsTerminal(os.Stdin)
+}
+
+func stdoutIsTerminal() bool {
+	return fileIsTerminal(os.Stdout)
+}
+
+func fileIsTerminal(file *os.File) bool {
+	info, err := file.Stat()
 	if err != nil {
 		return false
 	}
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeout time.Duration, family string) []result {
+func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeout time.Duration, family string, progress chan<- progressEvent) []result {
 	results := make([]result, len(endpoints))
 	var wg sync.WaitGroup
 
@@ -225,6 +258,9 @@ func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeo
 		go func(i int, ep endpoint) {
 			defer wg.Done()
 			results[i] = pingEndpoint(ctx, ep, duration, interval, timeout, family)
+			if progress != nil {
+				progress <- progressEvent{Done: 1}
+			}
 		}(i, ep)
 	}
 
@@ -242,6 +278,53 @@ func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeo
 		return results[i].Endpoint.Code < results[j].Endpoint.Code
 	})
 	return results
+}
+
+func printScanIntro(endpointCount int, duration, interval, timeout time.Duration, family string) {
+	fmt.Printf("Scanning %d GameLift UDP ping beacons.\n", endpointCount)
+	fmt.Printf("Each region is tested for %s with one UDP probe every %s. A reply must arrive within %s.\n", duration, interval, timeout)
+	fmt.Printf("The report will show latency, jitter, and packet loss for each endpoint. IP family: %s.\n\n", family)
+}
+
+func showScanProgress(done chan<- struct{}, progress <-chan progressEvent, total int, duration time.Duration) {
+	defer close(done)
+
+	frames := []string{"|", "/", "-", "\\"}
+	started := time.Now()
+	completed := 0
+	ticker := time.NewTicker(120 * time.Millisecond)
+	defer ticker.Stop()
+
+	render := func(frame string) {
+		elapsed := time.Since(started).Truncate(time.Second)
+		remaining := duration - time.Since(started)
+		if remaining < 0 {
+			remaining = 0
+		}
+		fmt.Printf("\r%s scanning endpoints... %d/%d complete, elapsed %s, about %s remaining   ",
+			frame, completed, total, elapsed, remaining.Truncate(time.Second))
+	}
+
+	render(frames[0])
+	frameIndex := 0
+	for {
+		select {
+		case event, ok := <-progress:
+			if !ok {
+				completed = total
+				render("done")
+				fmt.Print("\n\n")
+				return
+			}
+			completed += event.Done
+			if completed > total {
+				completed = total
+			}
+		case <-ticker.C:
+			frameIndex = (frameIndex + 1) % len(frames)
+		}
+		render(frames[frameIndex])
+	}
 }
 
 func pingEndpoint(ctx context.Context, ep endpoint, duration, interval, timeout time.Duration, family string) result {

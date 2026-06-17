@@ -35,6 +35,8 @@ Flags:
 
 On Windows, `-pause auto` keeps the console open with `Press Enter to quit...` when the tool is launched with no arguments, which is the usual double-click path. It does not pause when arguments are supplied or when stdin is redirected.
 
+In table mode, the tool prints a short explanation before the scan and shows a spinner while endpoints are being tested. JSON mode writes only JSON so it remains safe for automation.
+
 The table output is optimized for pasting into support tickets. JSON output is better for automated ingestion by a game team.
 
 ## Build
