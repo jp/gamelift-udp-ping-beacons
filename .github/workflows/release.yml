@@ -2,8 +2,13 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
-      - "v*"
+      - "*"
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -28,6 +33,7 @@ jobs:
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: test
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -62,7 +68,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          version="${GITHUB_REF_NAME}"
+          version="${GITHUB_REF_NAME//\//-}"
           name="gamelift-ping-report_${version}_${GOOS}_${GOARCH}"
           mkdir -p dist
           if [ "$GOOS" = "windows" ]; then
@@ -86,6 +92,7 @@ jobs:
   release:
     name: Publish GitHub release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
