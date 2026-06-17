@@ -39,6 +39,10 @@ In table mode, the tool prints a short explanation before the scan and shows a s
 
 The table output is optimized for pasting into support tickets. JSON output is better for automated ingestion by a game team.
 
+## Example Report
+
+![GameLift UDP ping beacon report screenshot](docs/images/screenshot-1.png)
+
 ## Build
 
 ```sh
