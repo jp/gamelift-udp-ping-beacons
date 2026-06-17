@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ type scanCompleteMsg report
 type progressClosedMsg struct{}
 
 type scanTickMsg time.Time
+
+const defaultTableHeight = 20
 
 type tuiModel struct {
 	ctx       context.Context
@@ -71,9 +74,9 @@ func runTUI(parent context.Context, endpoints []endpoint, duration, interval, ti
 	liveResults := initialResults(endpoints, family)
 	tbl := table.New(
 		table.WithColumns(resultColumns(120)),
-		table.WithRows(resultRows(liveResults)),
+		table.WithRows(resultRows(sortedResultsByAvgLatency(liveResults))),
 		table.WithFocused(true),
-		table.WithHeight(12),
+		table.WithHeight(defaultTableHeight),
 	)
 	tbl.SetStyles(tableStyles())
 
@@ -124,7 +127,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.table.SetColumns(resultColumns(msg.Width))
-		m.table.SetHeight(clamp(msg.Height-15, 8, 28))
+		m.table.SetHeight(tableHeightForTerminal(msg.Height, m.done))
 
 	case scanTickMsg:
 		if !m.started.IsZero() {
@@ -145,7 +148,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.completedRows[msg.Index] = true
 				m.completed++
 			}
-			m.table.SetRows(resultRows(m.liveResults))
+			m.table.SetRows(resultRows(sortedResultsByAvgLatency(m.liveResults)))
 		}
 		return m, m.waitProgressCmd()
 
@@ -160,7 +163,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.completed = len(m.endpoints)
 		m.elapsed = m.duration
 		m.liveResults = rep.Results
-		m.table.SetRows(resultRows(m.liveResults))
+		m.table.SetRows(resultRows(sortedResultsByAvgLatency(m.liveResults)))
 		return m, nil
 	}
 
@@ -245,6 +248,33 @@ func initialResults(endpoints []endpoint, family string) []result {
 		}
 	}
 	return results
+}
+
+func sortedResultsByAvgLatency(results []result) []result {
+	sorted := append([]result(nil), results...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return compareResultsByAvgLatency(sorted[i], sorted[j])
+	})
+	return sorted
+}
+
+func compareResultsByAvgLatency(a, b result) bool {
+	aUsable := hasUsableLatency(a)
+	bUsable := hasUsableLatency(b)
+	if aUsable != bUsable {
+		return aUsable
+	}
+	if aUsable && a.Avg != b.Avg {
+		return a.Avg < b.Avg
+	}
+	if a.Loss != b.Loss {
+		return a.Loss < b.Loss
+	}
+	return a.Endpoint.Code < b.Endpoint.Code
+}
+
+func hasUsableLatency(res result) bool {
+	return res.Error == "" && res.Received > 0 && res.Avg > 0
 }
 
 func (m tuiModel) waitProgressCmd() tea.Cmd {
@@ -361,4 +391,19 @@ func clamp(value, min, max int) int {
 		return max
 	}
 	return value
+}
+
+func tableHeightForTerminal(terminalHeight int, done bool) int {
+	reservedLines := 5
+	if done {
+		reservedLines = 8
+	}
+	return maxInt(8, terminalHeight-reservedLines)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

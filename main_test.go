@@ -201,3 +201,45 @@ func TestDurationLabel(t *testing.T) {
 		t.Fatalf("durationLabel(10s) = %q, want duration 10s", got)
 	}
 }
+
+func TestSortedResultsByAvgLatency(t *testing.T) {
+	results := []result{
+		{Endpoint: endpoint{Code: "waiting"}},
+		{Endpoint: endpoint{Code: "slow"}, Received: 2, Avg: 50 * time.Millisecond},
+		{Endpoint: endpoint{Code: "error"}, Error: "lookup failed"},
+		{Endpoint: endpoint{Code: "fast"}, Received: 2, Avg: 10 * time.Millisecond},
+		{Endpoint: endpoint{Code: "middle"}, Received: 2, Avg: 25 * time.Millisecond},
+	}
+
+	sorted := sortedResultsByAvgLatency(results)
+	got := []string{
+		sorted[0].Endpoint.Code,
+		sorted[1].Endpoint.Code,
+		sorted[2].Endpoint.Code,
+		sorted[3].Endpoint.Code,
+		sorted[4].Endpoint.Code,
+	}
+	want := []string{"fast", "middle", "slow", "error", "waiting"}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted codes = %v, want %v", got, want)
+		}
+	}
+
+	if results[0].Endpoint.Code != "waiting" {
+		t.Fatal("sortedResultsByAvgLatency mutated input slice")
+	}
+}
+
+func TestTableHeightForTerminal(t *testing.T) {
+	if got := tableHeightForTerminal(50, false); got != 45 {
+		t.Fatalf("tableHeightForTerminal(50, false) = %d, want 45", got)
+	}
+	if got := tableHeightForTerminal(50, true); got != 42 {
+		t.Fatalf("tableHeightForTerminal(50, true) = %d, want 42", got)
+	}
+	if got := tableHeightForTerminal(10, false); got != 8 {
+		t.Fatalf("tableHeightForTerminal(10, false) = %d, want 8", got)
+	}
+}
