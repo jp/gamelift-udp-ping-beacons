@@ -54,7 +54,8 @@ func TestValidateFlags(t *testing.T) {
 		wantErr  bool
 	}{
 		{"valid", time.Second, time.Millisecond, time.Second, "auto", "table", "auto", false},
-		{"bad duration", 0, time.Millisecond, time.Second, "auto", "table", "auto", true},
+		{"continuous duration", 0, time.Millisecond, time.Second, "auto", "table", "auto", false},
+		{"bad duration", -time.Second, time.Millisecond, time.Second, "auto", "table", "auto", true},
 		{"bad family", time.Second, time.Millisecond, time.Second, "ipx", "table", "auto", true},
 		{"bad format", time.Second, time.Millisecond, time.Second, "auto", "xml", "auto", true},
 		{"bad pause", time.Second, time.Millisecond, time.Second, "auto", "table", "sometimes", true},
@@ -109,7 +110,7 @@ func TestRunAllSendsProgress(t *testing.T) {
 		Address:     "example.invalid:7770",
 		Protocol:    "UDP",
 		IPv6Support: false,
-	}}, time.Second, time.Millisecond, time.Millisecond, "ipv6", progress)
+	}}, time.Second, time.Millisecond, time.Millisecond, "ipv6", progress, nil)
 
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -120,10 +121,83 @@ func TestRunAllSendsProgress(t *testing.T) {
 
 	select {
 	case event := <-progress:
-		if event.Done != 1 {
-			t.Fatalf("event.Done = %d, want 1", event.Done)
+		if event.Index != 0 {
+			t.Fatalf("event.Index = %d, want 0", event.Index)
+		}
+		if !event.Done {
+			t.Fatal("event.Done = false, want true")
+		}
+		if event.Result.Endpoint.Code != "test-1" {
+			t.Fatalf("event.Result.Endpoint.Code = %q, want test-1", event.Result.Endpoint.Code)
 		}
 	default:
 		t.Fatal("expected progress event")
+	}
+}
+
+func TestSummarizeResults(t *testing.T) {
+	summary := summarizeResults([]result{
+		{Received: 10},
+		{Received: 10, Loss: 5},
+		{Received: 0},
+		{Received: 1, Error: "lookup failed"},
+	})
+
+	if summary.ok != 1 {
+		t.Fatalf("summary.ok = %d, want 1", summary.ok)
+	}
+	if summary.degraded != 1 {
+		t.Fatalf("summary.degraded = %d, want 1", summary.degraded)
+	}
+	if summary.down != 2 {
+		t.Fatalf("summary.down = %d, want 2", summary.down)
+	}
+}
+
+func TestResultStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		res  result
+		want string
+	}{
+		{"waiting", result{}, "waiting"},
+		{"error", result{Error: "lookup failed"}, "error"},
+		{"no replies", result{Sent: 2}, "no replies"},
+		{"packet loss", result{Sent: 2, Received: 1, Loss: 50}, "packet loss"},
+		{"ok", result{Sent: 2, Received: 2}, "ok"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resultStatus(tt.res)
+			if got != tt.want {
+				t.Fatalf("resultStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPauseStateToggle(t *testing.T) {
+	var pause pauseState
+	if pause.isPaused() {
+		t.Fatal("new pauseState is paused")
+	}
+	if paused := pause.toggle(); !paused {
+		t.Fatal("toggle() = false, want true")
+	}
+	if !pause.isPaused() {
+		t.Fatal("pauseState should be paused")
+	}
+	if paused := pause.toggle(); paused {
+		t.Fatal("toggle() = true, want false")
+	}
+}
+
+func TestDurationLabel(t *testing.T) {
+	if got := durationLabel(0); got != "continuous" {
+		t.Fatalf("durationLabel(0) = %q, want continuous", got)
+	}
+	if got := durationLabel(10 * time.Second); got != "duration 10s" {
+		t.Fatalf("durationLabel(10s) = %q, want duration 10s", got)
 	}
 }

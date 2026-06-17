@@ -11,7 +11,7 @@ It probes every configured GameLift endpoint for a fixed duration and reports:
 ## Usage
 
 ```sh
-go run . -duration 10s
+go run .
 ```
 
 Useful options:
@@ -25,7 +25,7 @@ go run . -duration 30s -family ipv6
 
 Flags:
 
-- `-duration`: how long to ping each endpoint, default `10s`
+- `-duration`: how long to ping each endpoint; `0` runs until quit, default `0`
 - `-interval`: delay between probes sent to each endpoint, default `500ms`
 - `-timeout`: per-probe response timeout, default `1s`
 - `-family`: `auto`, `ipv4`, or `ipv6`, default `auto`
@@ -35,7 +35,7 @@ Flags:
 
 On Windows, `-pause auto` keeps the console open with `Press Enter to quit...` when the tool is launched with no arguments, which is the usual double-click path. It does not pause when arguments are supplied or when stdin is redirected.
 
-In table mode, the tool prints a short explanation before the scan and shows a spinner while endpoints are being tested. JSON mode writes only JSON so it remains safe for automation.
+In table mode, the tool opens an interactive terminal UI when stdout is a real terminal. By default it keeps pinging until you press `q`; press `space` to pause or resume pings. It shows a scrollable endpoint table, and each endpoint row updates as new UDP probe data arrives. JSON mode writes only JSON so it remains safe for automation.
 
 The table output is optimized for pasting into support tickets. JSON output is better for automated ingestion by a game team.
 

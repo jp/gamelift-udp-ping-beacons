@@ -15,11 +15,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	defaultDuration = 10 * time.Second
+	defaultDuration = 0
 	defaultInterval = 500 * time.Millisecond
 	defaultTimeout  = 1 * time.Second
 	payloadMagic    = "GLPING01"
@@ -68,7 +69,13 @@ type report struct {
 }
 
 type progressEvent struct {
-	Done int
+	Index  int
+	Result result
+	Done   bool
+}
+
+type pauseState struct {
+	paused atomic.Bool
 }
 
 var endpoints = []endpoint{
@@ -108,7 +115,7 @@ var endpoints = []endpoint{
 
 func main() {
 	launchedWithoutArgs := len(os.Args) == 1
-	duration := flag.Duration("duration", defaultDuration, "how long to ping each endpoint")
+	duration := flag.Duration("duration", defaultDuration, "how long to ping each endpoint; 0 runs until quit")
 	interval := flag.Duration("interval", defaultInterval, "delay between probes sent to each endpoint")
 	timeout := flag.Duration("timeout", defaultTimeout, "per-probe response timeout")
 	family := flag.String("family", "auto", "IP family to use: auto, ipv4, or ipv6")
@@ -123,24 +130,33 @@ func main() {
 		os.Exit(2)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *duration)
+	if *format == "table" && stdoutIsTerminal() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := runTUI(ctx, endpoints, *duration, *interval, *timeout, *family); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			maybePause(*pause, launchedWithoutArgs)
+			os.Exit(1)
+		}
+		return
+	}
+
+	effectiveDuration := *duration
+	if effectiveDuration == 0 {
+		effectiveDuration = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), effectiveDuration)
 	defer cancel()
 
 	var progress chan progressEvent
 	var progressDone chan struct{}
 	showProgress := *format == "table"
 	if showProgress {
-		printScanIntro(len(endpoints), *duration, *interval, *timeout, *family)
-		if stdoutIsTerminal() {
-			progress = make(chan progressEvent, len(endpoints))
-			progressDone = make(chan struct{})
-			go showScanProgress(progressDone, progress, len(endpoints), *duration)
-		} else {
-			fmt.Println("Scanning in progress...")
-		}
+		printScanIntro(len(endpoints), effectiveDuration, *interval, *timeout, *family)
+		fmt.Println("Scanning in progress...")
 	}
 
-	results := runAll(ctx, endpoints, *duration, *interval, *timeout, *family, progress)
+	results := runAll(ctx, endpoints, effectiveDuration, *interval, *timeout, *family, progress, nil)
 	if progress != nil {
 		close(progress)
 		<-progressDone
@@ -156,7 +172,7 @@ func main() {
 
 	rep := report{
 		GeneratedAt: time.Now().UTC(),
-		Duration:    duration.String(),
+		Duration:    effectiveDuration.String(),
 		Interval:    interval.String(),
 		Timeout:     timeout.String(),
 		Family:      *family,
@@ -182,8 +198,8 @@ func main() {
 }
 
 func validateFlags(duration, interval, timeout time.Duration, family, format, pause string) error {
-	if duration <= 0 {
-		return errors.New("duration must be greater than zero")
+	if duration < 0 {
+		return errors.New("duration must be zero or greater")
 	}
 	if interval <= 0 {
 		return errors.New("interval must be greater than zero")
@@ -249,7 +265,7 @@ func fileIsTerminal(file *os.File) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeout time.Duration, family string, progress chan<- progressEvent) []result {
+func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeout time.Duration, family string, progress chan<- progressEvent, pause *pauseState) []result {
 	results := make([]result, len(endpoints))
 	var wg sync.WaitGroup
 
@@ -257,10 +273,7 @@ func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeo
 		wg.Add(1)
 		go func(i int, ep endpoint) {
 			defer wg.Done()
-			results[i] = pingEndpoint(ctx, ep, duration, interval, timeout, family)
-			if progress != nil {
-				progress <- progressEvent{Done: 1}
-			}
+			results[i] = pingEndpoint(ctx, i, ep, duration, interval, timeout, family, progress, pause)
 		}(i, ep)
 	}
 
@@ -316,7 +329,9 @@ func showScanProgress(done chan<- struct{}, progress <-chan progressEvent, total
 				fmt.Print("\n\n")
 				return
 			}
-			completed += event.Done
+			if event.Done {
+				completed++
+			}
 			if completed > total {
 				completed = total
 			}
@@ -327,8 +342,12 @@ func showScanProgress(done chan<- struct{}, progress <-chan progressEvent, total
 	}
 }
 
-func pingEndpoint(ctx context.Context, ep endpoint, duration, interval, timeout time.Duration, family string) result {
+func pingEndpoint(ctx context.Context, index int, ep endpoint, duration, interval, timeout time.Duration, family string, progress chan<- progressEvent, pause *pauseState) result {
 	res := result{Endpoint: ep, Network: networkFor(ep, family)}
+	defer func() {
+		sendProgress(ctx, progress, progressEvent{Index: index, Result: snapshotResult(res), Done: true})
+	}()
+
 	if res.Network == "" {
 		res.Error = "endpoint is not marked as IPv6-capable"
 		return res
@@ -347,18 +366,25 @@ func pingEndpoint(ctx context.Context, ep endpoint, duration, interval, timeout 
 	}
 	defer conn.Close()
 
-	deadline := time.Now().Add(duration)
+	var deadline time.Time
+	if duration > 0 {
+		deadline = time.Now().Add(duration)
+	}
 	nextSend := time.Now()
 	buf := make([]byte, 128)
 
 	for seq := 0; ; seq++ {
+		if !waitIfPaused(ctx, pause) {
+			break
+		}
+
 		now := time.Now()
-		if now.After(deadline) || ctx.Err() != nil {
+		if deadlineReached(now, deadline) || ctx.Err() != nil {
 			break
 		}
 		if now.Before(nextSend) {
 			sleepUntil(ctx, nextSend)
-			if ctx.Err() != nil || time.Now().After(deadline) {
+			if ctx.Err() != nil || deadlineReached(time.Now(), deadline) {
 				break
 			}
 		}
@@ -368,12 +394,17 @@ func pingEndpoint(ctx context.Context, ep endpoint, duration, interval, timeout 
 		sentAt := time.Now()
 		if _, err := conn.Write(payload); err != nil {
 			res.Error = err.Error()
+			sendProgress(ctx, progress, progressEvent{Index: index, Result: snapshotResult(res)})
 			break
 		}
 
-		readUntil := minTime(sentAt.Add(timeout), deadline)
+		readUntil := sentAt.Add(timeout)
+		if !deadline.IsZero() {
+			readUntil = minTime(readUntil, deadline)
+		}
 		if err := conn.SetReadDeadline(readUntil); err != nil {
 			res.Error = err.Error()
+			sendProgress(ctx, progress, progressEvent{Index: index, Result: snapshotResult(res)})
 			break
 		}
 
@@ -385,15 +416,63 @@ func pingEndpoint(ctx context.Context, ep endpoint, duration, interval, timeout 
 			var netErr net.Error
 			if !errors.As(err, &netErr) || !netErr.Timeout() {
 				res.Error = err.Error()
+				sendProgress(ctx, progress, progressEvent{Index: index, Result: snapshotResult(res)})
 				break
 			}
 		}
 
+		sendProgress(ctx, progress, progressEvent{Index: index, Result: snapshotResult(res)})
 		nextSend = sentAt.Add(interval)
 	}
 
 	finalizeResult(&res)
 	return res
+}
+
+func (p *pauseState) toggle() bool {
+	if p == nil {
+		return false
+	}
+	next := !p.paused.Load()
+	p.paused.Store(next)
+	return next
+}
+
+func (p *pauseState) isPaused() bool {
+	return p != nil && p.paused.Load()
+}
+
+func waitIfPaused(ctx context.Context, pause *pauseState) bool {
+	for pause != nil && pause.isPaused() {
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	return ctx.Err() == nil
+}
+
+func deadlineReached(now, deadline time.Time) bool {
+	return !deadline.IsZero() && now.After(deadline)
+}
+
+func snapshotResult(res result) result {
+	res.Samples = append([]time.Duration(nil), res.Samples...)
+	finalizeResult(&res)
+	return res
+}
+
+func sendProgress(ctx context.Context, progress chan<- progressEvent, event progressEvent) {
+	if progress == nil {
+		return
+	}
+	select {
+	case progress <- event:
+	case <-ctx.Done():
+	}
 }
 
 func networkFor(ep endpoint, family string) string {
