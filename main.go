@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -102,16 +103,19 @@ var endpoints = []endpoint{
 }
 
 func main() {
+	launchedWithoutArgs := len(os.Args) == 1
 	duration := flag.Duration("duration", defaultDuration, "how long to ping each endpoint")
 	interval := flag.Duration("interval", defaultInterval, "delay between probes sent to each endpoint")
 	timeout := flag.Duration("timeout", defaultTimeout, "per-probe response timeout")
 	family := flag.String("family", "auto", "IP family to use: auto, ipv4, or ipv6")
 	format := flag.String("format", "table", "report format: table or json")
+	pause := flag.String("pause", "auto", "pause before exiting: auto, always, or never")
 	includeSamples := flag.Bool("samples", false, "include raw RTT samples in JSON output")
 	flag.Parse()
 
-	if err := validateFlags(*duration, *interval, *timeout, *family, *format); err != nil {
+	if err := validateFlags(*duration, *interval, *timeout, *family, *format, *pause); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		maybePause(*pause, launchedWithoutArgs)
 		os.Exit(2)
 	}
 
@@ -142,14 +146,17 @@ func main() {
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(rep); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
+			maybePause(*pause, launchedWithoutArgs)
 			os.Exit(1)
 		}
 	default:
 		printTable(rep)
 	}
+
+	maybePause(*pause, launchedWithoutArgs)
 }
 
-func validateFlags(duration, interval, timeout time.Duration, family, format string) error {
+func validateFlags(duration, interval, timeout time.Duration, family, format, pause string) error {
 	if duration <= 0 {
 		return errors.New("duration must be greater than zero")
 	}
@@ -169,7 +176,44 @@ func validateFlags(duration, interval, timeout time.Duration, family, format str
 	default:
 		return errors.New("format must be table or json")
 	}
+	switch pause {
+	case "auto", "always", "never":
+	default:
+		return errors.New("pause must be auto, always, or never")
+	}
 	return nil
+}
+
+func maybePause(pause string, launchedWithoutArgs bool) {
+	if !shouldPause(pause, runtime.GOOS, launchedWithoutArgs, stdinIsTerminal()) {
+		return
+	}
+
+	fmt.Fprint(os.Stdout, "\nPress Enter to quit...")
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+}
+
+func shouldPause(pause, goos string, launchedWithoutArgs, stdinIsTerminal bool) bool {
+	if !stdinIsTerminal {
+		return false
+	}
+
+	switch pause {
+	case "always":
+		return true
+	case "auto":
+		return goos == "windows" && launchedWithoutArgs
+	default:
+		return false
+	}
+}
+
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func runAll(ctx context.Context, endpoints []endpoint, duration, interval, timeout time.Duration, family string) []result {

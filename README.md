@@ -17,7 +17,7 @@ go run . -duration 10s
 Useful options:
 
 ```sh
-go run . -duration 30s -interval 250ms -timeout 1s
+go run . -duration 30s -interval 500ms -timeout 1s
 go run . -duration 30s -format json
 go run . -duration 30s -family ipv4
 go run . -duration 30s -family ipv6
@@ -30,7 +30,10 @@ Flags:
 - `-timeout`: per-probe response timeout, default `1s`
 - `-family`: `auto`, `ipv4`, or `ipv6`, default `auto`
 - `-format`: `table` or `json`, default `table`
+- `-pause`: `auto`, `always`, or `never`, default `auto`
 - `-samples`: include raw RTT samples in JSON output
+
+On Windows, `-pause auto` keeps the console open with `Press Enter to quit...` when the tool is launched with no arguments, which is the usual double-click path. It does not pause when arguments are supplied or when stdin is redirected.
 
 The table output is optimized for pasting into support tickets. JSON output is better for automated ingestion by a game team.
 

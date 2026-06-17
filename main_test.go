@@ -49,19 +49,48 @@ func TestValidateFlags(t *testing.T) {
 		timeout  time.Duration
 		family   string
 		format   string
+		pause    string
 		wantErr  bool
 	}{
-		{"valid", time.Second, time.Millisecond, time.Second, "auto", "table", false},
-		{"bad duration", 0, time.Millisecond, time.Second, "auto", "table", true},
-		{"bad family", time.Second, time.Millisecond, time.Second, "ipx", "table", true},
-		{"bad format", time.Second, time.Millisecond, time.Second, "auto", "xml", true},
+		{"valid", time.Second, time.Millisecond, time.Second, "auto", "table", "auto", false},
+		{"bad duration", 0, time.Millisecond, time.Second, "auto", "table", "auto", true},
+		{"bad family", time.Second, time.Millisecond, time.Second, "ipx", "table", "auto", true},
+		{"bad format", time.Second, time.Millisecond, time.Second, "auto", "xml", "auto", true},
+		{"bad pause", time.Second, time.Millisecond, time.Second, "auto", "table", "sometimes", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateFlags(tt.duration, tt.interval, tt.timeout, tt.family, tt.format)
+			err := validateFlags(tt.duration, tt.interval, tt.timeout, tt.family, tt.format, tt.pause)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validateFlags() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestShouldPause(t *testing.T) {
+	tests := []struct {
+		name                string
+		pause               string
+		goos                string
+		launchedWithoutArgs bool
+		stdinIsTerminal     bool
+		want                bool
+	}{
+		{"windows double click", "auto", "windows", true, true, true},
+		{"windows with args", "auto", "windows", false, true, false},
+		{"non windows auto", "auto", "darwin", true, true, false},
+		{"always terminal", "always", "darwin", false, true, true},
+		{"always redirected", "always", "windows", true, false, false},
+		{"never", "never", "windows", true, true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldPause(tt.pause, tt.goos, tt.launchedWithoutArgs, tt.stdinIsTerminal)
+			if got != tt.want {
+				t.Fatalf("shouldPause() = %v, want %v", got, tt.want)
 			}
 		})
 	}
