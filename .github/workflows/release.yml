@@ -8,7 +8,15 @@ on:
     tags:
       - "*"
   pull_request:
+  release:
+    types:
+      - published
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish, for example 0.0.4
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -20,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -33,7 +43,7 @@ jobs:
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: test
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -55,6 +65,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -67,8 +79,9 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
         run: |
-          version="${GITHUB_REF_NAME//\//-}"
+          version="${VERSION//\//-}"
           name="gamelift-ping-report_${version}_${GOOS}_${GOARCH}"
           mkdir -p dist
           if [ "$GOOS" = "windows" ]; then
@@ -83,7 +96,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: gamelift-ping-report_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          name: gamelift-ping-report_${{ matrix.goos }}_${{ matrix.goarch }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -92,7 +105,7 @@ jobs:
   release:
     name: Publish GitHub release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -104,6 +117,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
           files: |
             dist/*.tar.gz
             dist/*.zip
