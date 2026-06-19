@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -241,5 +244,47 @@ func TestTableHeightForTerminal(t *testing.T) {
 	}
 	if got := tableHeightForTerminal(10, false); got != 8 {
 		t.Fatalf("tableHeightForTerminal(10, false) = %d, want 8", got)
+	}
+}
+
+func TestFormatTraceOutput(t *testing.T) {
+	if got := formatTraceOutput("hop 1\n", nil); got != "hop 1" {
+		t.Fatalf("formatTraceOutput() = %q, want hop 1", got)
+	}
+	if got := formatTraceOutput("", nil); got != "(no traceroute output)" {
+		t.Fatalf("empty formatTraceOutput() = %q", got)
+	}
+	if got := formatTraceOutput("hop 1", context.DeadlineExceeded); !strings.Contains(got, "traceroute error") {
+		t.Fatalf("error formatTraceOutput() = %q, want traceroute error", got)
+	}
+	if got := formatTraceOutput("", os.ErrPermission); !strings.Contains(got, "ICMP/raw socket permission") {
+		t.Fatalf("permission formatTraceOutput() = %q, want permission explanation", got)
+	}
+}
+
+func TestRollingAvg(t *testing.T) {
+	if got := rollingAvg(0, 10*time.Millisecond, 1); got != 10*time.Millisecond {
+		t.Fatalf("rollingAvg first = %s, want 10ms", got)
+	}
+	if got := rollingAvg(10*time.Millisecond, 20*time.Millisecond, 2); got != 15*time.Millisecond {
+		t.Fatalf("rollingAvg second = %s, want 15ms", got)
+	}
+}
+
+func TestFormatTraceHops(t *testing.T) {
+	output := formatTraceHops("example.com", net.ParseIP("203.0.113.1"), []traceHop{{
+		TTL:      1,
+		IP:       net.ParseIP("192.0.2.1"),
+		Host:     "router.example",
+		Sent:     2,
+		Received: 1,
+		LastRTT:  10 * time.Millisecond,
+		AvgRTT:   10 * time.Millisecond,
+	}}, true)
+	if !strings.Contains(output, "router.example") {
+		t.Fatalf("formatTraceHops() missing reverse DNS: %q", output)
+	}
+	if !strings.Contains(output, "50.0%") {
+		t.Fatalf("formatTraceHops() missing loss: %q", output)
 	}
 }

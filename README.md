@@ -35,7 +35,9 @@ Flags:
 
 On Windows, `-pause auto` keeps the console open with `Press Enter to quit...` when the tool is launched with no arguments, which is the usual double-click path. It does not pause when arguments are supplied or when stdin is redirected.
 
-In table mode, the tool opens an interactive terminal UI when stdout is a real terminal. By default it keeps pinging until you press `q`; press `space` to pause or resume pings. It shows a scrollable endpoint table, and each endpoint row updates as new UDP probe data arrives. JSON mode writes only JSON so it remains safe for automation.
+In table mode, the tool opens an interactive terminal UI when stdout is a real terminal. By default it keeps pinging until you press `q`; press `space` to pause or resume pings. It shows a scrollable endpoint table, and each endpoint row updates as new UDP probe data arrives. Press `Enter` on an endpoint to open a custom traceroute view with reverse DNS; discovered hops are pinged repeatedly using the same interval as the endpoint scan. JSON mode writes only JSON so it remains safe for automation.
+
+The custom traceroute uses UDP TTL probes and ICMP replies. Some operating systems require elevated permissions for ICMP/raw sockets; when that happens, the traceroute view shows the permission error.
 
 The table output is optimized for pasting into support tickets. JSON output is better for automated ingestion by a game team.
 

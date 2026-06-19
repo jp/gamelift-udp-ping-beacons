@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -18,6 +19,21 @@ type scanCompleteMsg report
 type progressClosedMsg struct{}
 
 type scanTickMsg time.Time
+
+type traceCompleteMsg struct {
+	Code   string
+	Output string
+	Err    error
+}
+
+type traceStoppedMsg struct{}
+
+type viewMode int
+
+const (
+	tableMode viewMode = iota
+	traceMode
+)
 
 const defaultTableHeight = 20
 
@@ -32,6 +48,7 @@ type tuiModel struct {
 
 	progressEvents chan progressEvent
 	table          table.Model
+	viewport       viewport.Model
 	report         *report
 	liveResults    []result
 	completedRows  []bool
@@ -44,6 +61,14 @@ type tuiModel struct {
 	elapsed   time.Duration
 	paused    bool
 	done      bool
+	mode      viewMode
+
+	traceTarget  result
+	traceRunning bool
+	traceOutput  string
+	traceError   error
+	traceEvents  chan traceCompleteMsg
+	traceCancel  context.CancelFunc
 }
 
 var (
@@ -79,6 +104,7 @@ func runTUI(parent context.Context, endpoints []endpoint, duration, interval, ti
 		table.WithHeight(defaultTableHeight),
 	)
 	tbl.SetStyles(tableStyles())
+	vp := viewport.New(120, 20)
 
 	model := tuiModel{
 		ctx:            ctx,
@@ -90,6 +116,7 @@ func runTUI(parent context.Context, endpoints []endpoint, duration, interval, ti
 		family:         family,
 		progressEvents: make(chan progressEvent, len(endpoints)*64),
 		table:          tbl,
+		viewport:       vp,
 		liveResults:    liveResults,
 		completedRows:  make([]bool, len(endpoints)),
 		scanPause:      &pauseState{},
@@ -110,17 +137,43 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc", "q":
+			if msg.String() == "esc" && m.mode == traceMode {
+				m.stopTrace()
+				m.mode = tableMode
+				return m, nil
+			}
 			m.cancel()
 			return m, tea.Quit
+		case "backspace":
+			if m.mode == traceMode {
+				m.stopTrace()
+				m.mode = tableMode
+				return m, nil
+			}
 		case " ":
-			if !m.done {
+			if !m.done && m.mode == tableMode {
 				m.paused = m.scanPause.toggle()
 			}
 			return m, nil
 		case "enter":
-			if m.done {
-				return m, tea.Quit
+			if m.mode == traceMode {
+				return m, nil
 			}
+			target, ok := m.selectedResult()
+			if !ok {
+				return m, nil
+			}
+			m.mode = traceMode
+			m.traceTarget = target
+			m.traceRunning = true
+			m.traceOutput = ""
+			m.traceError = nil
+			m.traceEvents = make(chan traceCompleteMsg, 32)
+			traceCtx, traceCancel := context.WithCancel(m.ctx)
+			m.traceCancel = traceCancel
+			m.viewport.GotoTop()
+			m.viewport.SetContent("Running custom traceroute...")
+			return m, tea.Batch(startCustomTraceCmd(traceCtx, target, m.interval, m.timeout, m.traceEvents), m.waitTraceCmd())
 		}
 
 	case tea.WindowSizeMsg:
@@ -128,6 +181,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.table.SetColumns(resultColumns(msg.Width))
 		m.table.SetHeight(tableHeightForTerminal(msg.Height, m.done))
+		m.viewport.Width = maxInt(20, msg.Width-2)
+		m.viewport.Height = maxInt(8, msg.Height-7)
 
 	case scanTickMsg:
 		if !m.started.IsZero() {
@@ -165,6 +220,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveResults = rep.Results
 		m.table.SetRows(resultRows(sortedResultsByAvgLatency(m.liveResults)))
 		return m, nil
+
+	case traceCompleteMsg:
+		if m.traceTarget.Endpoint.Code != msg.Code {
+			return m, nil
+		}
+		m.traceError = msg.Err
+		m.traceOutput = msg.Output
+		m.viewport.SetContent(formatTraceOutput(msg.Output, msg.Err))
+		if msg.Err != nil {
+			m.traceRunning = false
+			return m, nil
+		}
+		return m, m.waitTraceCmd()
+
+	case traceStoppedMsg:
+		m.traceRunning = false
+		return m, nil
+	}
+
+	if m.mode == traceMode {
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
@@ -181,12 +259,14 @@ func (m tuiModel) View() string {
 		status = "paused"
 	}
 	b.WriteString(uiMutedStyle.Render(fmt.Sprintf(
-		"%d endpoints | %s | interval %s | timeout %s | family %s | %s | space pause/resume | q quit",
+		"%d endpoints | %s | interval %s | timeout %s | family %s | %s | enter traceroute | space pause/resume | q quit",
 		len(m.endpoints), durationLabel(m.duration), m.interval, m.timeout, m.family, status,
 	)))
 	b.WriteString("\n\n")
 
-	if !m.done {
+	if m.mode == traceMode {
+		b.WriteString(m.traceView())
+	} else if !m.done {
 		b.WriteString(m.table.View())
 	} else {
 		b.WriteString(m.resultView())
@@ -208,9 +288,24 @@ func (m tuiModel) resultView() string {
 			uiWarnStyle.Render("loss"), summary.degraded,
 			uiBadStyle.Render("down"), summary.down,
 		),
-		uiMutedStyle.Render("Use arrow keys to scroll. Press Enter or q to quit."),
+		uiMutedStyle.Render("Use arrow keys to scroll. Press Enter to traceroute the selected endpoint, q to quit."),
 		"",
 		m.table.View(),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m tuiModel) traceView() string {
+	host := hostOnly(m.traceTarget.Endpoint.Address)
+	status := "complete"
+	if m.traceRunning {
+		status = "running"
+	}
+	lines := []string{
+		uiTitleStyle.Render(fmt.Sprintf("Traceroute: %s (%s)", m.traceTarget.Endpoint.Code, host)),
+		uiMutedStyle.Render(fmt.Sprintf("status: %s | esc/backspace return | q quit", status)),
+		"",
+		m.viewport.View(),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -248,6 +343,103 @@ func initialResults(endpoints []endpoint, family string) []result {
 		}
 	}
 	return results
+}
+
+func (m tuiModel) selectedResult() (result, bool) {
+	row := m.table.SelectedRow()
+	if len(row) == 0 {
+		return result{}, false
+	}
+	code := row[0]
+	for _, res := range m.liveResults {
+		if res.Endpoint.Code == code {
+			return res, true
+		}
+	}
+	return result{}, false
+}
+
+func startCustomTraceCmd(ctx context.Context, target result, interval, timeout time.Duration, events chan<- traceCompleteMsg) tea.Cmd {
+	return func() tea.Msg {
+		go func() {
+			defer close(events)
+			host := hostOnly(target.Endpoint.Address)
+			var latest string
+			err := runCustomTrace(ctx, host, interval, timeout, func(output string) {
+				latest = output
+				select {
+				case events <- traceCompleteMsg{Code: target.Endpoint.Code, Output: output}:
+				case <-ctx.Done():
+				}
+			})
+			if err != nil && ctx.Err() == nil {
+				select {
+				case events <- traceCompleteMsg{Code: target.Endpoint.Code, Output: latest, Err: err}:
+				case <-ctx.Done():
+				}
+			}
+		}()
+		return nil
+	}
+}
+
+func (m tuiModel) waitTraceCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.traceEvents == nil {
+			return traceStoppedMsg{}
+		}
+		event, ok := <-m.traceEvents
+		if !ok {
+			return traceStoppedMsg{}
+		}
+		return event
+	}
+}
+
+func (m *tuiModel) stopTrace() {
+	if m.traceCancel != nil {
+		m.traceCancel()
+		m.traceCancel = nil
+	}
+	m.traceRunning = false
+}
+
+func formatTraceOutput(output string, err error) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		output = "(no traceroute output)"
+	}
+	if err != nil {
+		if isPermissionError(err) {
+			return tracePermissionMessage(err)
+		}
+		return output + "\n\n" + uiBadStyle.Render("traceroute error: "+err.Error())
+	}
+	return output
+}
+
+func tracePermissionMessage(err error) string {
+	var b strings.Builder
+	b.WriteString(uiBadStyle.Render("Custom traceroute needs ICMP/raw socket permission."))
+	b.WriteString("\n\n")
+	b.WriteString("The endpoint ping table still works without this permission, but custom traceroute cannot receive ICMP TTL-exceeded replies or ping intermediate hops.\n\n")
+	switch runtime.GOOS {
+	case "linux":
+		b.WriteString("Linux options:\n")
+		b.WriteString("  sudo ./gamelift-ping-report\n")
+		b.WriteString("  sudo setcap cap_net_raw+ep ./gamelift-ping-report\n")
+	case "darwin":
+		b.WriteString("macOS option:\n")
+		b.WriteString("  sudo ./gamelift-ping-report\n")
+	case "windows":
+		b.WriteString("Windows option:\n")
+		b.WriteString("  Run the executable from an elevated Administrator terminal.\n")
+	default:
+		b.WriteString("Run the executable with privileges that allow raw ICMP sockets on this OS.\n")
+	}
+	b.WriteString("\nUnderlying error: ")
+	b.WriteString(err.Error())
+	return b.String()
 }
 
 func sortedResultsByAvgLatency(results []result) []result {

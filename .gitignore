@@ -1,4 +1,5 @@
 .gocache/
+.gomodcache/
 gamelift-ping-report
 gamelift-udp-ping-beacons
 .DS_Store
